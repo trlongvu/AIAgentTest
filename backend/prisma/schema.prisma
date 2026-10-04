@@ -1,0 +1,141 @@
+// Prisma = ORM: mô tả bảng ở đây, Prisma sinh migration SQL + TypeScript client có kiểu
+// Sau khi sửa file này: npm run prisma:migrate
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector] // pgvector cho RAG
+}
+
+enum Role {
+  ADMIN
+  AGENT
+}
+
+enum Channel {
+  MESSENGER
+  ZALO
+  WEB
+}
+
+enum HandledBy {
+  BOT
+  HUMAN
+}
+
+enum ConversationStatus {
+  OPEN
+  CLOSED
+}
+
+enum MessageRole {
+  CUSTOMER
+  BOT
+  AGENT
+}
+
+// Nhân viên dùng dashboard
+model User {
+  id           Int            @id @default(autoincrement())
+  email        String         @unique
+  passwordHash String
+  name         String
+  role         Role           @default(AGENT)
+  createdAt    DateTime       @default(now())
+  assigned     Conversation[]
+  messages     Message[]
+
+  @@map("users")
+}
+
+// Khách hàng — mỗi người trên mỗi kênh là một contact
+model Contact {
+  id            Int            @id @default(autoincrement())
+  channel       Channel
+  externalId    String // ID do nền tảng cấp (PSID Facebook, user_id Zalo...)
+  name          String?
+  avatarUrl     String?
+  phone         String?
+  email         String?
+  tags          String[]       @default([])
+  notes         String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  conversations Conversation[]
+
+  @@unique([channel, externalId])
+  @@map("contacts")
+}
+
+model Conversation {
+  id            Int                @id @default(autoincrement())
+  contactId     Int
+  contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  channel       Channel
+  handledBy     HandledBy          @default(BOT) // BOT: AI tự trả lời, HUMAN: nhân viên tiếp quản
+  status        ConversationStatus @default(OPEN)
+  assigneeId    Int?
+  assignee      User?              @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  handoffReason String?
+  lastMessageAt DateTime           @default(now())
+  createdAt     DateTime           @default(now())
+  messages      Message[]
+
+  @@index([lastMessageAt])
+  @@map("conversations")
+}
+
+model Message {
+  id             Int          @id @default(autoincrement())
+  conversationId Int
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String
+  externalId     String? // ID tin từ nền tảng — chống lưu trùng khi webhook gửi lại
+  senderId       Int? // nhân viên nào gửi (role = AGENT)
+  sender         User?        @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  metadata       Json? // BOT: nguồn kiến thức đã dùng, lý do chuyển người...
+  createdAt      DateTime     @default(now())
+
+  @@unique([conversationId, externalId])
+  @@index([conversationId, id])
+  @@map("messages")
+}
+
+// Kho kiến thức cho RAG
+model Document {
+  id        Int      @id @default(autoincrement())
+  title     String
+  createdAt DateTime @default(now())
+  chunks    Chunk[]
+
+  @@map("documents")
+}
+
+model Chunk {
+  id         Int                         @id @default(autoincrement())
+  documentId Int
+  document   Document                    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  // Prisma chưa hỗ trợ kiểu vector -> đọc/ghi cột này bằng SQL thô (xem knowledge.service.ts)
+  embedding  Unsupported("vector(1024)")
+
+  @@map("chunks")
+}
+
+// Cấu hình bot — sửa trên dashboard, không cần deploy lại
+model BotSettings {
+  id                  Int      @id @default(1)
+  botEnabled          Boolean  @default(true)
+  businessName        String   @default("Cửa hàng của chúng tôi")
+  businessDescription String   @default("")
+  instructions        String   @default("")
+  updatedAt           DateTime @updatedAt
+
+  @@map("bot_settings")
+}
